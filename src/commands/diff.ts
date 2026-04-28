@@ -54,6 +54,83 @@ interface DiscordEmbed {
   color?: number;
 }
 
+interface DiscordButton {
+  type: 2; // BUTTON
+  label: string;
+  style: 1 | 2 | 3 | 4; // 1=primary, 2=secondary, 3=success, 4=danger
+  custom_id: string;
+}
+
+interface DiscordActionRow {
+  type: 1; // ACTION_ROW
+  components: DiscordButton[];
+}
+
+type DiffReply = {
+  content?: string;
+  embeds?: DiscordEmbed[];
+  components?: DiscordActionRow[];
+};
+
+/**
+ * Encode the state needed to navigate to file index `idx` of a PR's files.
+ * Discord's button custom_id has a 100-char limit; we keep this short.
+ *
+ * Format: dn:<owner>:<repo>:<pr>:<idx>
+ *   "dn" = diff_nav (abbreviated to leave room for long owner/repo names)
+ */
+function encodeNavId(owner: string, repo: string, prNumber: number, idx: number): string {
+  return `dn:${owner}:${repo}:${prNumber}:${idx}`;
+}
+
+export interface DiffNavState {
+  owner: string;
+  repo: string;
+  prNumber: number;
+  idx: number;
+}
+
+export function decodeNavId(customId: string): DiffNavState | null {
+  const parts = customId.split(":");
+  if (parts.length !== 5 || parts[0] !== "dn") return null;
+  const [, owner, repo, prStr, idxStr] = parts;
+  const prNumber = parseInt(prStr, 10);
+  const idx = parseInt(idxStr, 10);
+  if (!Number.isFinite(prNumber) || !Number.isFinite(idx)) return null;
+  return { owner, repo, prNumber, idx };
+}
+
+function navButtons(
+  owner: string,
+  repo: string,
+  prNumber: number,
+  idx: number,
+  total: number,
+): DiscordActionRow[] {
+  if (total <= 1) return [];
+  const prevIdx = (idx - 1 + total) % total;
+  const nextIdx = (idx + 1) % total;
+  return [
+    {
+      type: 1,
+      components: [
+        {
+          type: 2,
+          label: "⬅ Prev",
+          style: 2,
+          custom_id: encodeNavId(owner, repo, prNumber, prevIdx),
+        },
+        {
+          type: 2,
+          label: "Next ➡",
+          style: 2,
+          custom_id: encodeNavId(owner, repo, prNumber, nextIdx),
+        },
+      ],
+    },
+  ];
+}
+
 function truncate(s: string, max: number): string {
   if (s.length <= max) return s;
   return s.slice(0, max - 50) + "\n... (truncated; see full file on GitHub)";
@@ -107,7 +184,7 @@ export async function handleDiff(
   prArg: string,
   pathArg: string | undefined,
   shortcuts: ShortcutMap,
-): Promise<{ content?: string; embeds?: DiscordEmbed[] }> {
+): Promise<DiffReply> {
   const target = parseRepoTarget(prArg, shortcuts);
   if (!target) {
     return {
@@ -153,57 +230,103 @@ export async function handleDiff(
   }
 
   // Mode 2: single-file diff.
-  const match = files.find((f) => f.filename === pathArg);
-  if (!match) {
-    // Try a fuzzy "endsWith" match before giving up — useful when the
-    // user types just the filename without the directory prefix.
-    const candidates = files.filter((f) => f.filename.endsWith(pathArg));
-    if (candidates.length === 1) {
-      return showSingleFile(gh, target.owner, target.repo, pr, candidates[0]);
-    }
-    if (candidates.length > 1) {
-      return {
-        content:
-          `Multiple files match "\`${pathArg}\`":\n` +
-          candidates.map((c) => `- \`${c.filename}\``).join("\n") +
-          `\n\nPass the full path to disambiguate.`,
-      };
-    }
-    return {
-      content:
-        `Path "\`${pathArg}\`" not found in PR #${pr.number}.\n\n` +
-        `Available files:\n` +
-        files.slice(0, 20).map((f) => `- \`${f.filename}\``).join("\n") +
-        (files.length > 20 ? `\n_(... and ${files.length - 20} more)_` : ""),
-    };
+  const exactIdx = files.findIndex((f) => f.filename === pathArg);
+  if (exactIdx >= 0) {
+    return showSingleFile(target.owner, target.repo, pr, files, exactIdx);
   }
 
-  return showSingleFile(gh, target.owner, target.repo, pr, match);
+  // Try a fuzzy "endsWith" match before giving up — useful when the
+  // user types just the filename without the directory prefix.
+  const candidateIdxs = files
+    .map((f, i) => ({ f, i }))
+    .filter(({ f }) => f.filename.endsWith(pathArg));
+  if (candidateIdxs.length === 1) {
+    return showSingleFile(target.owner, target.repo, pr, files, candidateIdxs[0].i);
+  }
+  if (candidateIdxs.length > 1) {
+    return {
+      content:
+        `Multiple files match "\`${pathArg}\`":\n` +
+        candidateIdxs.map(({ f }) => `- \`${f.filename}\``).join("\n") +
+        `\n\nPass the full path to disambiguate.`,
+    };
+  }
+  return {
+    content:
+      `Path "\`${pathArg}\`" not found in PR #${pr.number}.\n\n` +
+      `Available files:\n` +
+      files.slice(0, 20).map((f) => `- \`${f.filename}\``).join("\n") +
+      (files.length > 20 ? `\n_(... and ${files.length - 20} more)_` : ""),
+  };
+}
+
+/**
+ * Handler for the prev/next navigation buttons attached to a single-file
+ * diff. Called when Discord sends a MESSAGE_COMPONENT interaction whose
+ * custom_id we encoded via {@link encodeNavId}.
+ *
+ * Re-fetches the PR's files (the worker is stateless), validates the
+ * (owner, repo) is in the configured whitelist, and renders the file at
+ * the requested index. Returns the same shape as showSingleFile so the
+ * caller can decide between "send" and "update" interaction responses.
+ */
+export async function handleDiffNav(
+  gh: GitHub,
+  state: DiffNavState,
+  shortcuts: ShortcutMap,
+): Promise<DiffReply> {
+  const allowed = new Set(Object.values(shortcuts));
+  if (!allowed.has(`${state.owner}/${state.repo}`)) {
+    return { content: "❌ Repo no longer in scope." };
+  }
+
+  let pr: Awaited<ReturnType<typeof getPullRequest>>;
+  let files: PullFile[];
+  try {
+    [pr, files] = await Promise.all([
+      getPullRequest(gh, state.owner, state.repo, state.prNumber),
+      listPullFiles(gh, state.owner, state.repo, state.prNumber, 100),
+    ]);
+  } catch (e) {
+    if (e instanceof GitHubError) {
+      return { content: `❌ GitHub error: ${e.message}\n${e.details ?? ""}` };
+    }
+    return { content: `❌ ${(e as Error).message}` };
+  }
+
+  if (files.length === 0) return { content: "_(no files in PR)_" };
+  const idx = ((state.idx % files.length) + files.length) % files.length;
+  return showSingleFile(state.owner, state.repo, pr, files, idx);
 }
 
 function showSingleFile(
-  _gh: GitHub,
   owner: string,
   repo: string,
   pr: { number: number; html_url: string },
-  file: PullFile,
-): { content?: string; embeds: DiscordEmbed[] } {
+  files: PullFile[],
+  idx: number,
+): DiffReply {
+  const file = files[idx];
+  const total = files.length;
   const fileUrl = `${pr.html_url}/files#diff-${encodeURIComponent(file.filename)}`;
+  const position = total > 1 ? ` · file ${idx + 1}/${total}` : "";
   const embed: DiscordEmbed = {
     title: `[${owner}/${repo}] PR #${pr.number} — ${file.filename}`,
     url: fileUrl,
-    description: `**${file.status}** (+${file.additions} / -${file.deletions})`,
+    description: `**${file.status}** (+${file.additions} / -${file.deletions})${position}`,
   };
+  const components = navButtons(owner, repo, pr.number, idx, total);
 
   if (!file.patch) {
     return {
       content: "_(no patch available — file may be binary, too large, or only metadata changed)_",
       embeds: [embed],
+      components,
     };
   }
 
   const truncated = truncate(file.patch, MAX_PATCH_CHARS);
   const content = "```ansi\n" + colorizePatch(truncated) + "\n```";
 
-  return { content, embeds: [embed] };
+  return { content, embeds: [embed], components };
 }

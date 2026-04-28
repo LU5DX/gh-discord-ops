@@ -21,7 +21,12 @@ import { handleChecks } from "./commands/checks";
 import { handleComment } from "./commands/comment";
 import { handleApprove } from "./commands/approve";
 import { handleMerge } from "./commands/merge";
-import { handleDiff, handleDiffPathAutocomplete } from "./commands/diff";
+import {
+  handleDiff,
+  handleDiffPathAutocomplete,
+  handleDiffNav,
+  decodeNavId,
+} from "./commands/diff";
 
 interface Env {
   DISCORD_PUBLIC_KEY: string;
@@ -39,12 +44,14 @@ interface Env {
 const InteractionType = {
   PING: 1,
   APPLICATION_COMMAND: 2,
+  MESSAGE_COMPONENT: 3,
   APPLICATION_COMMAND_AUTOCOMPLETE: 4,
 } as const;
 
 const InteractionResponseType = {
   PONG: 1,
   CHANNEL_MESSAGE_WITH_SOURCE: 4,
+  UPDATE_MESSAGE: 7,
   APPLICATION_COMMAND_AUTOCOMPLETE_RESULT: 8,
 } as const;
 
@@ -60,8 +67,11 @@ interface DiscordInteractionOption {
 interface DiscordInteraction {
   type: number;
   data?: {
-    name: string;
+    name?: string;
     options?: DiscordInteractionOption[];
+    /** Set on MESSAGE_COMPONENT interactions (button clicks etc). */
+    custom_id?: string;
+    component_type?: number;
   };
   member?: { user: { id: string; username: string } };
   user?: { id: string; username: string };
@@ -81,10 +91,26 @@ function ephemeralReply(content: string): Response {
   });
 }
 
-function ephemeralEmbedReply(payload: { content?: string; embeds?: unknown[] }): Response {
+function ephemeralEmbedReply(payload: {
+  content?: string;
+  embeds?: unknown[];
+  components?: unknown[];
+}): Response {
   return jsonResponse({
     type: InteractionResponseType.CHANNEL_MESSAGE_WITH_SOURCE,
     data: { ...payload, flags: EPHEMERAL_FLAG },
+  });
+}
+
+/** Update the existing (ephemeral) message — used for component callbacks. */
+function updateMessageReply(payload: {
+  content?: string;
+  embeds?: unknown[];
+  components?: unknown[];
+}): Response {
+  return jsonResponse({
+    type: InteractionResponseType.UPDATE_MESSAGE,
+    data: payload,
   });
 }
 
@@ -104,6 +130,23 @@ function autocompleteResponse(
     type: InteractionResponseType.APPLICATION_COMMAND_AUTOCOMPLETE_RESULT,
     data: { choices },
   });
+}
+
+async function handleComponent(
+  interaction: DiscordInteraction,
+  gh: ReturnType<typeof makeGitHub>,
+  shortcuts: ShortcutMap,
+): Promise<Response> {
+  const customId = interaction.data?.custom_id;
+  if (!customId) return ephemeralReply("Missing component custom_id.");
+
+  const navState = decodeNavId(customId);
+  if (navState) {
+    const reply = await handleDiffNav(gh, navState, shortcuts);
+    return updateMessageReply(reply);
+  }
+
+  return ephemeralReply(`Unknown component: \`${customId}\``);
 }
 
 async function handleAutocomplete(
@@ -170,6 +213,17 @@ export default {
       const gh = makeGitHub(env.GITHUB_PAT);
       const shortcuts = parseShortcutMap(env.REPO_SHORTCUTS_JSON);
       return await handleAutocomplete(interaction, gh, shortcuts);
+    }
+
+    // Component callbacks (button clicks, select-menu picks, etc).
+    if (interaction.type === InteractionType.MESSAGE_COMPONENT) {
+      const callerId = interaction.member?.user?.id ?? interaction.user?.id;
+      if (callerId !== env.DISCORD_OWNER_ID) {
+        return ephemeralReply("❌ You are not authorized to use this bot.");
+      }
+      const gh = makeGitHub(env.GITHUB_PAT);
+      const shortcuts = parseShortcutMap(env.REPO_SHORTCUTS_JSON);
+      return await handleComponent(interaction, gh, shortcuts);
     }
 
     if (interaction.type !== InteractionType.APPLICATION_COMMAND) {
