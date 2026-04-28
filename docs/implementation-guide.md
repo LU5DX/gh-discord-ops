@@ -7,10 +7,12 @@ want a low-friction Discord-as-control-surface for their repos.
 1. **Discord's built-in GitHub webhook** — automatic embeds in a Discord
    channel when PRs, issues, and pushes happen on a GitHub repo. No code
    to write; ~5 min of clicking. Section 1 below.
-2. **Custom slash-command bot** — `/preview`, `/comment`, `/approve`,
-   `/merge`, `/diff`, `/checks` against your repos, callable from any
-   channel. Cloudflare Worker, Discord interactions, GitHub PAT.
-   ~6 hours of work the first time, mostly setup not code. Section 2 below.
+2. **Custom slash-command bot** — `/preview`, `/diff`, `/comment`,
+   `/review`, `/approve`, `/merge`, `/checks` against your repos,
+   callable from any channel. `/diff` ships with file-path autocomplete
+   and prev/next navigation buttons for mobile-friendly review.
+   Cloudflare Worker, Discord interactions, GitHub PAT. ~6 hours of
+   work the first time, mostly setup not code. Section 2 below.
 
 The two integrations complement each other: GitHub events flow *into*
 Discord via the webhook, you act on them *out* of Discord via the bot.
@@ -326,8 +328,9 @@ Layout we'll build:
 │   ├── repos.ts          # repo addressing (URL parser + shortcuts)
 │   └── commands/
 │       ├── preview.ts
-│       ├── diff.ts
+│       ├── diff.ts          # + autocomplete + nav buttons
 │       ├── comment.ts
+│       ├── review.ts        # inline PR review comments
 │       ├── approve.ts
 │       ├── merge.ts
 │       └── checks.ts
@@ -391,8 +394,17 @@ The worker is one file — `src/index.ts` — that:
    uses this when you first wire the endpoint URL.
 6. If `type === 2` (APPLICATION_COMMAND): looks at `data.name`,
    dispatches to a per-command handler.
-7. Returns `{ type: 4, data: { content: "...", flags: 64 } }` so
-   replies are ephemeral (only the invoker sees them).
+7. If `type === 3` (MESSAGE_COMPONENT): a button was clicked. Decode
+   the button's `custom_id` (we encode small bits of state in it,
+   since the worker is stateless) and respond with `type: 7`
+   (UPDATE_MESSAGE) to edit the original ephemeral message in place
+   — used by `/diff`'s prev/next navigation.
+8. If `type === 4` (APPLICATION_COMMAND_AUTOCOMPLETE): the user is
+   typing in an autocomplete-enabled field. Read the focused option,
+   compute up to 25 suggestions, respond with `type: 8`. Used to
+   suggest PR file paths in `/diff` and `/review`.
+9. For command responses: returns `{ type: 4, data: { content: "...",
+   flags: 64 } }` so replies are ephemeral (only the invoker sees them).
 
 The full implementation is in `src/index.ts` and `src/verify.ts` of
 this repo; reuse them.
@@ -410,9 +422,48 @@ The repo addressing (`src/repos.ts`) accepts two forms for each `pr`
 or `target` argument:
 
 - A full GitHub URL: `https://github.com/<owner>/<repo>/pull/12`
-- A shortcut + number: `<shortcut> 12`. Define your shortcuts at the
-  top of `src/repos.ts`. We also enforce a whitelist of allowed repos
-  so a leaked PAT can't be used to act on arbitrary repos.
+- A shortcut + number: `<shortcut> 12`. Shortcuts are configured at
+  runtime via the `REPO_SHORTCUTS_JSON` worker secret (see Step 8c).
+  The values of that map double as the whitelist of repos the bot
+  will act on, so a leaked PAT can't be used against arbitrary repos.
+
+#### `/diff` UX details (autocomplete + nav buttons + ANSI color)
+
+The default `/diff <pr>` lists changed files. `/diff <pr> <path>` shows
+the unified diff for one file. To make this usable from mobile, the
+implementation adds three things on top of the basic command:
+
+1. **Autocomplete on `path`** — once you've typed a `pr` value, Discord
+   asks the worker for path suggestions as you type. The worker fetches
+   the PR's file list and returns up to 25 matches. Eliminates typing
+   long paths by hand.
+2. **Prev / Next nav buttons** — every single-file diff response
+   carries two buttons that walk through the PR's files in order. The
+   worker is stateless, so the target file index is encoded in each
+   button's `custom_id`; on click, the worker re-fetches and edits the
+   same ephemeral message in place (`UPDATE_MESSAGE` response).
+3. **ANSI color in the diff body** — diff bodies are wrapped in a
+   ` ```ansi ` code block with explicit color escapes per line (green
+   for `+`, red for `-`, cyan for `@@`). Discord desktop renders this
+   reliably; mobile clients render ANSI inconsistently and may show
+   the lines uncolored — but the `+`/`-` prefixes still convey the
+   information. The block lives in `content` (not in the embed) since
+   even desktop's embed renderer strips ANSI in some versions.
+
+There's a subtlety: `content` has a 2000-char hard limit (vs 4096
+for embeds). ANSI escapes add ~9 chars per colored line, so the raw
+patch is capped at ~1200 chars and a final-length check trims more
+on a newline boundary if needed. Larger diffs are truncated with a
+"see full file on GitHub" pointer.
+
+#### `/review`: inline review comments
+
+`/review <pr> <path> <line> <comment>` posts a comment attached to a
+specific line of the PR's diff — the same kind of comment you'd add
+from GitHub's Files Changed tab. The `path` field reuses the `/diff`
+autocomplete handler. If the line isn't part of the PR's actual
+changes, GitHub returns 422 and the bot surfaces a friendly error
+asking you to pick a line that was added or modified.
 
 ### Step 7: register slash commands with Discord
 
@@ -479,14 +530,27 @@ choose a subdomain like `<you>.workers.dev`. In the dashboard:
 
 #### 8c. Set the Worker secrets
 
-Three secrets, each prompts for its value (it isn't echoed in the
+Four secrets, each prompts for its value (it isn't echoed in the
 terminal nor stored in shell history):
 
 ```bash
 npx wrangler secret put DISCORD_PUBLIC_KEY    # paste your PUBLIC_KEY
 npx wrangler secret put DISCORD_OWNER_ID      # paste your OWNER_ID
 npx wrangler secret put GITHUB_PAT            # paste the PAT from step 4
+npx wrangler secret put REPO_SHORTCUTS_JSON   # JSON map of shortcuts
 ```
+
+`REPO_SHORTCUTS_JSON` is a single JSON line mapping shortcut alias to
+`owner/repo`, e.g.:
+
+```json
+{"main":"myorg/main-app","infra":"myorg/infra"}
+```
+
+The bot rejects any PR whose repo isn't a value in this map ("out of
+scope"), so this doubles as the bot's whitelist. Leaving it unset
+means the bot only accepts full URLs to whitelisted repos — and the
+empty whitelist rejects everything, so set it before deploying.
 
 For each, if wrangler asks "There doesn't seem to be a Worker called
 `<name>`. Do you want to create a new Worker?" — answer **Y**. Wrangler
@@ -594,6 +658,23 @@ the error, read the log. Most likely an unhandled exception in a
 command handler — wrap GitHub API calls in try/catch and return an
 error reply explicitly.
 
+### Discord shows "This interaction failed" on a button click
+
+The worker returned HTTP 200 but the response body was rejected by
+Discord. Most common cause: `data.content` exceeded 2000 chars
+(Discord's silent hard limit). Other possibilities:
+
+- Wrong response `type` for the interaction (use `type: 7`
+  UPDATE_MESSAGE for component callbacks, not `type: 4`).
+- Missing `flags: 64` (EPHEMERAL) when updating an ephemeral message
+  — Discord can reject if the flag isn't echoed back.
+- Invalid `custom_id` shape (max 100 chars; encode minimal state).
+
+`npx wrangler tail` shows the request as `Ok` but the failure
+manifests only client-side. Add a `console.log(JSON.stringify(body))`
+right before returning the response and re-tail to see the actual
+size and shape.
+
 ### GitHub API returns 404 on a repo or issue you know exists
 
 Either:
@@ -666,9 +747,13 @@ worker. Out of scope for this v1 guide.
 
 - **3-second response window** on the initial reply. If your handler
   takes longer (rare for simple GitHub calls), use the deferred-response
-  pattern (`type: 5` then PATCH later). Not implemented in this v1
-  bot — none of our calls go over 1s.
-- **Slash command count**: 100 per app, plenty for our 7.
+  pattern (`type: 5` for commands, `type: 6` for components, then PATCH
+  later via the followup webhook). Not needed in this v1 bot — every
+  handler completes in under 1s including the GitHub round-trip.
+- **2000-char hard limit on `data.content`** in interaction responses.
+  Embed descriptions allow 4096 chars, but ANSI color rendering only
+  works in `content`, so long colored diffs need to be truncated.
+- **Slash command count**: 100 per app, plenty for our 8.
 
 ### GitHub API
 

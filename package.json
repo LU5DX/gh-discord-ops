@@ -1,6 +1,6 @@
 {
   "name": "gh-discord-ops",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "Discord slash command bot for GitHub ops — Cloudflare Worker template",
   "scripts": {

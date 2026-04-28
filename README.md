@@ -21,8 +21,9 @@ deployment, secret configuration, slash command registration, testing).
 |---|---|
 | `/help` | List all commands |
 | `/preview <pr>` | Show PR summary (title, body, files, status checks) |
-| `/diff <pr> [path]` | Show file diff for a PR; optionally only one path |
+| `/diff <pr> [path]` | Show file diff for a PR. Path autocompletes; prev/next buttons walk the file list |
 | `/comment <target> <text>` | Post a comment on a PR or issue |
+| `/review <pr> <path> <line> <comment>` | Inline review comment on a specific line of a PR's diff |
 | `/approve <pr> [message]` | Review the PR with APPROVE |
 | `/merge <pr> [strategy]` | Merge a PR (squash / merge / rebase) |
 | `/checks <pr>` | Show CI check status |
@@ -103,12 +104,23 @@ After this, slash commands typed in your server reach the worker.
 ```
 .
 ├── src/
-│   ├── index.ts          # worker entry: dispatches commands
+│   ├── index.ts          # worker entry: dispatches all interaction types
 │   ├── verify.ts         # Ed25519 signature verification
-│   └── (commands wired up incrementally as separate files)
+│   ├── github.ts         # tiny REST wrapper (no @octokit dep)
+│   ├── repos.ts          # URL/shortcut parsing + whitelist
+│   └── commands/
+│       ├── preview.ts
+│       ├── diff.ts       # + path autocomplete + nav buttons + ANSI color
+│       ├── comment.ts
+│       ├── review.ts     # inline PR review comments
+│       ├── approve.ts
+│       ├── merge.ts
+│       └── checks.ts
 ├── scripts/
 │   └── register-commands.mjs   # one-off slash command registration
-├── wrangler.toml          # Cloudflare Worker config
+├── docs/
+│   └── implementation-guide.md  # end-to-end setup walkthrough
+├── wrangler.toml         # Cloudflare Worker config
 ├── package.json
 ├── tsconfig.json
 └── README.md
@@ -123,4 +135,6 @@ After this, slash commands typed in your server reach the worker.
 
 ## Status
 
-v0 — scaffold only. `/help` works; other commands return "not implemented".
+v1 — all 8 commands implemented and in production use. `/diff` has
+autocomplete + prev/next nav buttons + ANSI-colored diff body. See
+`docs/implementation-guide.md` for setup details and design notes.
