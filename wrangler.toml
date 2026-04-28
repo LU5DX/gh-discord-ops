@@ -1,0 +1,20 @@
+# Cloudflare Worker config for the Discord ops bot.
+#
+# To deploy: `wrangler deploy`
+# To run locally: `wrangler dev`
+#
+# Secrets (set via `wrangler secret put <NAME>`, NOT in this file):
+#   DISCORD_PUBLIC_KEY    - Discord application's Ed25519 public key (hex)
+#   DISCORD_OWNER_ID      - Your Discord user ID (only this user can invoke commands)
+#   GITHUB_PAT            - GitHub personal access token (acts as the bot's identity)
+#   REPO_SHORTCUTS_JSON   - JSON map of shortcut -> "owner/repo", e.g.
+#                           {"main":"myorg/main-app","infra":"myorg/infra"}
+#                           Also serves as the whitelist of repos the bot will
+#                           act on. Anything not in the values is rejected.
+
+name = "gh-discord-ops"
+main = "src/index.ts"
+compatibility_date = "2025-01-01"
+compatibility_flags = ["nodejs_compat"]
+
+# No KV / D1 / R2 needed for v1 — all state lives in GitHub itself.
