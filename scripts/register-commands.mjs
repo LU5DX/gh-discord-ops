@@ -65,6 +65,7 @@ const COMMANDS = [
         description: "Optional: only show diff for this file path",
         type: 3,
         required: false,
+        autocomplete: true,
       },
     ],
   },

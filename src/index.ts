@@ -21,7 +21,7 @@ import { handleChecks } from "./commands/checks";
 import { handleComment } from "./commands/comment";
 import { handleApprove } from "./commands/approve";
 import { handleMerge } from "./commands/merge";
-import { handleDiff } from "./commands/diff";
+import { handleDiff, handleDiffPathAutocomplete } from "./commands/diff";
 
 interface Env {
   DISCORD_PUBLIC_KEY: string;
@@ -39,20 +39,29 @@ interface Env {
 const InteractionType = {
   PING: 1,
   APPLICATION_COMMAND: 2,
+  APPLICATION_COMMAND_AUTOCOMPLETE: 4,
 } as const;
 
 const InteractionResponseType = {
   PONG: 1,
   CHANNEL_MESSAGE_WITH_SOURCE: 4,
+  APPLICATION_COMMAND_AUTOCOMPLETE_RESULT: 8,
 } as const;
 
 const EPHEMERAL_FLAG = 1 << 6; // 64. Makes a reply visible only to the invoker.
+
+interface DiscordInteractionOption {
+  name: string;
+  value: string | number | boolean;
+  /** Set on the option currently being typed, in autocomplete interactions. */
+  focused?: boolean;
+}
 
 interface DiscordInteraction {
   type: number;
   data?: {
     name: string;
-    options?: Array<{ name: string; value: string | number | boolean }>;
+    options?: DiscordInteractionOption[];
   };
   member?: { user: { id: string; username: string } };
   user?: { id: string; username: string };
@@ -88,6 +97,36 @@ function getStringOption(
   return typeof opt.value === "string" ? opt.value : String(opt.value);
 }
 
+function autocompleteResponse(
+  choices: Array<{ name: string; value: string }>,
+): Response {
+  return jsonResponse({
+    type: InteractionResponseType.APPLICATION_COMMAND_AUTOCOMPLETE_RESULT,
+    data: { choices },
+  });
+}
+
+async function handleAutocomplete(
+  interaction: DiscordInteraction,
+  gh: ReturnType<typeof makeGitHub>,
+  shortcuts: ShortcutMap,
+): Promise<Response> {
+  const commandName = interaction.data?.name;
+  const focused = interaction.data?.options?.find((o) => o.focused);
+  if (!commandName || !focused) return autocompleteResponse([]);
+
+  const typed = typeof focused.value === "string" ? focused.value : "";
+
+  if (commandName === "diff" && focused.name === "path") {
+    const prArg = getStringOption(interaction, "pr");
+    if (!prArg) return autocompleteResponse([]);
+    const choices = await handleDiffPathAutocomplete(gh, prArg, typed, shortcuts);
+    return autocompleteResponse(choices);
+  }
+
+  return autocompleteResponse([]);
+}
+
 export default {
   async fetch(request: Request, env: Env): Promise<Response> {
     if (request.method === "GET") {
@@ -117,6 +156,20 @@ export default {
     // PING handshake — Discord pings the endpoint when it's first registered.
     if (interaction.type === InteractionType.PING) {
       return jsonResponse({ type: InteractionResponseType.PONG });
+    }
+
+    // Autocomplete: short-circuit before auth. Discord expects type-8 results
+    // (not type-4 messages), and we want to avoid leaking errors via slash-
+    // command-style replies. Non-owners and any error path return empty
+    // choices, which Discord renders as "No options match your search".
+    if (interaction.type === InteractionType.APPLICATION_COMMAND_AUTOCOMPLETE) {
+      const callerId = interaction.member?.user?.id ?? interaction.user?.id;
+      if (callerId !== env.DISCORD_OWNER_ID) {
+        return autocompleteResponse([]);
+      }
+      const gh = makeGitHub(env.GITHUB_PAT);
+      const shortcuts = parseShortcutMap(env.REPO_SHORTCUTS_JSON);
+      return await handleAutocomplete(interaction, gh, shortcuts);
     }
 
     if (interaction.type !== InteractionType.APPLICATION_COMMAND) {

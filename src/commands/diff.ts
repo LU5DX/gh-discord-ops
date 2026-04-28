@@ -61,6 +61,43 @@ function formatFileList(files: PullFile[]): string {
     .join("\n");
 }
 
+/**
+ * Autocomplete handler for the `path` option of /diff.
+ *
+ * Discord sends an APPLICATION_COMMAND_AUTOCOMPLETE interaction (type 4)
+ * each time the user types in an autocomplete-enabled field. We need to
+ * return up to 25 `{ name, value }` choices within ~3s.
+ *
+ * For /diff: read the already-entered `pr` value, fetch its files, and
+ * fuzzy-filter by the substring the user has typed so far.
+ *
+ * Discord limits both `name` and `value` to 100 chars. Paths longer than
+ * that get filtered out (rare in practice).
+ */
+export async function handleDiffPathAutocomplete(
+  gh: GitHub,
+  prArg: string,
+  typed: string,
+  shortcuts: ShortcutMap,
+): Promise<Array<{ name: string; value: string }>> {
+  const target = parseRepoTarget(prArg, shortcuts);
+  if (!target) return [];
+
+  let files: PullFile[];
+  try {
+    files = await listPullFiles(gh, target.owner, target.repo, target.number, 100);
+  } catch {
+    return [];
+  }
+
+  const needle = typed.toLowerCase();
+  return files
+    .filter((f) => f.filename.length <= 100)
+    .filter((f) => needle === "" || f.filename.toLowerCase().includes(needle))
+    .slice(0, 25)
+    .map((f) => ({ name: f.filename, value: f.filename }));
+}
+
 export async function handleDiff(
   gh: GitHub,
   prArg: string,
