@@ -5,11 +5,13 @@
  *   - Without `path`: list all changed files with their stats. Useful for
  *     "what's in this PR?" at a glance, beyond what /preview shows.
  *   - With `path`: show the unified diff for that single file in a
- *     ```diff code block (Discord renders +/- coloring).
+ *     ```ansi code block with explicit color escapes per line. We use
+ *     ansi instead of ```diff because Discord mobile clients render diff
+ *     blocks inconsistently (no green/red highlight). ansi works on both.
  *
- * Discord's embed description has a 4096-char limit. Patches commonly run
- * over that. We truncate at ~3800 chars (leaving headroom for fences and
- * a "truncated" notice) and link to the file on GitHub for the full view.
+ * Discord's embed description has a 4096-char limit. ANSI escapes add
+ * overhead per colored line (~9 chars), so we cap the raw patch lower
+ * (~3400 chars of source) to leave headroom for escapes + fences.
  */
 
 import { parseRepoTarget, ShortcutMap } from "../repos";
@@ -21,7 +23,25 @@ import {
   PullFile,
 } from "../github";
 
-const MAX_PATCH_CHARS = 3800;
+const MAX_PATCH_CHARS = 3400;
+
+const ANSI_RED = "[0;31m";
+const ANSI_GREEN = "[0;32m";
+const ANSI_CYAN = "[0;36m";
+const ANSI_RESET = "[0m";
+
+function colorizePatch(patch: string): string {
+  return patch
+    .split("\n")
+    .map((line) => {
+      if (line.startsWith("+++") || line.startsWith("---")) return line;
+      if (line.startsWith("+")) return `${ANSI_GREEN}${line}${ANSI_RESET}`;
+      if (line.startsWith("-")) return `${ANSI_RED}${line}${ANSI_RESET}`;
+      if (line.startsWith("@@")) return `${ANSI_CYAN}${line}${ANSI_RESET}`;
+      return line;
+    })
+    .join("\n");
+}
 
 interface DiscordEmbed {
   title: string;
@@ -128,17 +148,31 @@ function showSingleFile(
   file: PullFile,
 ): { embeds: DiscordEmbed[] } {
   const fileUrl = `${pr.html_url}/files#diff-${encodeURIComponent(file.filename)}`;
-  const patch = file.patch ?? "_(no patch available — file may be binary, too large, or only metadata changed)_";
-  const body =
-    "```diff\n" + truncate(patch, MAX_PATCH_CHARS) + "\n```";
+  const header = `**${file.status}** (+${file.additions} / -${file.deletions})\n\n`;
+
+  if (!file.patch) {
+    return {
+      embeds: [
+        {
+          title: `[${owner}/${repo}] PR #${pr.number} — ${file.filename}`,
+          url: fileUrl,
+          description:
+            header +
+            "_(no patch available — file may be binary, too large, or only metadata changed)_",
+        },
+      ],
+    };
+  }
+
+  const truncated = truncate(file.patch, MAX_PATCH_CHARS);
+  const body = "```ansi\n" + colorizePatch(truncated) + "\n```";
 
   return {
     embeds: [
       {
         title: `[${owner}/${repo}] PR #${pr.number} — ${file.filename}`,
         url: fileUrl,
-        description:
-          `**${file.status}** (+${file.additions} / -${file.deletions})\n\n${body}`,
+        description: header + body,
       },
     ],
   };
