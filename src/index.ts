@@ -110,7 +110,7 @@ function updateMessageReply(payload: {
 }): Response {
   return jsonResponse({
     type: InteractionResponseType.UPDATE_MESSAGE,
-    data: payload,
+    data: { ...payload, flags: EPHEMERAL_FLAG },
   });
 }
 
