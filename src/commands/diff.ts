@@ -27,7 +27,12 @@ import {
   PullFile,
 } from "../github";
 
-const MAX_PATCH_CHARS = 1700;
+/** Worst-case raw-patch size before colorization. Picked so that even a
+ *  patch of 100% short +/- lines (max ANSI overhead) fits under Discord's
+ *  2000-char content limit. A second hard check below truncates further
+ *  if the colorized result still overshoots. */
+const MAX_PATCH_CHARS = 1200;
+const CONTENT_HARD_LIMIT = 1980;
 
 const ANSI_RED = "[0;31m";
 const ANSI_GREEN = "[0;32m";
@@ -326,7 +331,22 @@ function showSingleFile(
   }
 
   const truncated = truncate(file.patch, MAX_PATCH_CHARS);
-  const content = "```ansi\n" + colorizePatch(truncated) + "\n```";
+  let content = "```ansi\n" + colorizePatch(truncated) + "\n```";
+
+  // Belt-and-suspenders: ANSI overhead is line-count-dependent, so the
+  // raw-char cap above can still produce content >2000. Discord silently
+  // rejects anything over the limit ("This interaction failed"). Cut more
+  // aggressively if needed, on a newline boundary so we don't split an
+  // ANSI escape in half.
+  if (content.length > CONTENT_HARD_LIMIT) {
+    const head = "```ansi\n";
+    const tail = `${ANSI_RESET}\n... (truncated; see full file on GitHub)\n` + "```";
+    const bodyBudget = CONTENT_HARD_LIMIT - head.length - tail.length;
+    const colored = colorizePatch(truncated);
+    const cut = colored.lastIndexOf("\n", bodyBudget);
+    const safeBody = cut > 0 ? colored.slice(0, cut) : colored.slice(0, bodyBudget);
+    content = head + safeBody + tail;
+  }
 
   return { content, embeds: [embed], components };
 }
