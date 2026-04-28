@@ -129,6 +129,37 @@ const COMMANDS = [
     ],
   },
   {
+    name: "review",
+    description: "Post an inline comment on a specific line of a PR's diff",
+    options: [
+      {
+        name: "pr",
+        description: "PR number (with shortcut) or full GitHub URL",
+        type: 3,
+        required: true,
+      },
+      {
+        name: "path",
+        description: "File path in the PR (autocompletes from changed files)",
+        type: 3,
+        required: true,
+        autocomplete: true,
+      },
+      {
+        name: "line",
+        description: "Line number on the new (RIGHT) side of the diff",
+        type: 4,
+        required: true,
+      },
+      {
+        name: "comment",
+        description: "The review comment body",
+        type: 3,
+        required: true,
+      },
+    ],
+  },
+  {
     name: "checks",
     description: "Show CI check status for a PR",
     options: [

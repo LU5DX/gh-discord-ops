@@ -27,6 +27,7 @@ import {
   handleDiffNav,
   decodeNavId,
 } from "./commands/diff";
+import { handleReview } from "./commands/review";
 
 interface Env {
   DISCORD_PUBLIC_KEY: string;
@@ -123,6 +124,16 @@ function getStringOption(
   return typeof opt.value === "string" ? opt.value : String(opt.value);
 }
 
+function getIntegerOption(
+  interaction: DiscordInteraction,
+  name: string,
+): number | undefined {
+  const opt = interaction.data?.options?.find((o) => o.name === name);
+  if (!opt) return undefined;
+  const n = typeof opt.value === "number" ? opt.value : Number(opt.value);
+  return Number.isFinite(n) ? n : undefined;
+}
+
 function autocompleteResponse(
   choices: Array<{ name: string; value: string }>,
 ): Response {
@@ -160,7 +171,10 @@ async function handleAutocomplete(
 
   const typed = typeof focused.value === "string" ? focused.value : "";
 
-  if (commandName === "diff" && focused.name === "path") {
+  if (
+    (commandName === "diff" || commandName === "review") &&
+    focused.name === "path"
+  ) {
     const prArg = getStringOption(interaction, "pr");
     if (!prArg) return autocompleteResponse([]);
     const choices = await handleDiffPathAutocomplete(gh, prArg, typed, shortcuts);
@@ -254,6 +268,7 @@ export default {
             "• `/preview <pr>` — show PR summary\n" +
             "• `/diff <pr> [path]` — list files or show a single file's diff\n" +
             "• `/comment <target> <text>` — add a comment to a PR or issue\n" +
+            "• `/review <pr> <path> <line> <comment>` — inline review comment on a line\n" +
             "• `/approve <pr> [message]` — review with APPROVE\n" +
             "• `/merge <pr> [strategy]` — merge a PR (squash/merge/rebase)\n" +
             "• `/checks <pr>` — show CI check status\n" +
@@ -296,6 +311,18 @@ export default {
         const prArg = getStringOption(interaction, "pr");
         if (!prArg) return ephemeralReply("Missing `pr` argument.");
         return ephemeralEmbedReply(await handleChecks(gh, prArg, shortcuts));
+      }
+      case "review": {
+        const prArg = getStringOption(interaction, "pr");
+        const path = getStringOption(interaction, "path");
+        const line = getIntegerOption(interaction, "line");
+        const comment = getStringOption(interaction, "comment");
+        if (!prArg || !path || line === undefined || !comment) {
+          return ephemeralReply("Missing `pr`, `path`, `line`, or `comment`.");
+        }
+        return ephemeralEmbedReply(
+          await handleReview(gh, prArg, path, line, comment, shortcuts),
+        );
       }
       default:
         return ephemeralReply(`Unknown command: \`/${commandName}\``);

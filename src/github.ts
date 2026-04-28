@@ -209,6 +209,32 @@ export function approvePullRequest(
   );
 }
 
+export interface PullReviewComment {
+  id: number;
+  html_url: string;
+  body: string;
+  path: string;
+  line: number | null;
+}
+
+export function postPullReviewComment(
+  gh: GitHub,
+  owner: string,
+  repo: string,
+  number: number,
+  args: { body: string; commit_id: string; path: string; line: number },
+): Promise<PullReviewComment> {
+  return ghJson<PullReviewComment>(
+    gh,
+    `/repos/${owner}/${repo}/pulls/${number}/comments`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ...args, side: "RIGHT" }),
+    },
+  );
+}
+
 export function mergePullRequest(
   gh: GitHub,
   owner: string,
